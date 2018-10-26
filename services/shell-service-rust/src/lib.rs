@@ -28,6 +28,7 @@ use channel_protocol::ChannelMessage;
 use kubos_system::Config as ServiceConfig;
 use shell_protocol::{ProcessHandler, ProtocolError, ShellMessage, ShellProtocol};
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -35,7 +36,7 @@ use std::time::Duration;
 
 #[derive(Debug)]
 struct ThreadProcess {
-    pub sender: Sender<ChannelMessage>,
+    pub sender: Sender<(ChannelMessage, SocketAddr)>,
     pub pid: u32,
     pub path: String,
 }
@@ -72,7 +73,7 @@ fn thread_body(
     timeout: Duration,
     proc_handle: ProcessHandler,
     shared_threads: Arc<Mutex<HashMap<u32, ThreadProcess>>>,
-    receiver: Receiver<ChannelMessage>,
+    receiver: Receiver<(ChannelMessage, SocketAddr)>,
 ) -> () {
     let mut s_protocol =
         ShellProtocol::new(&host, &remote, channel_id, Box::new(Some(proc_handle)));
@@ -80,7 +81,7 @@ fn thread_body(
     // Receive and react to incoming shell protocol messages
     match s_protocol.message_engine(
         |d| match receiver.recv_timeout(d) {
-            Ok(v) => Ok(v),
+            Ok((v, s)) => Ok((v, s)),
             Err(RecvTimeoutError::Timeout) => Err(ProtocolError::ReceiveTimeout),
             Err(e) => Err(ProtocolError::ReceiveError {
                 err: format!("Error {:?}", e),
@@ -174,8 +175,8 @@ pub fn recv_loop(config: ServiceConfig) -> Result<(), failure::Error> {
             } => {
                 if !threads.lock().unwrap().contains_key(&channel_id) {
                     let (sender, receiver): (
-                        Sender<ChannelMessage>,
-                        Receiver<ChannelMessage>,
+                        Sender<(ChannelMessage, SocketAddr)>,
+                        Receiver<(ChannelMessage, SocketAddr)>,
                     ) = mpsc::channel();
 
                     let proc_handle = match ProcessHandler::spawn(command.to_owned(), args) {
@@ -214,7 +215,10 @@ pub fn recv_loop(config: ServiceConfig) -> Result<(), failure::Error> {
             // Pass along the message to existing process
             _ => {
                 if let Some(process_handle) = threads.lock().unwrap().get(&channel_id) {
-                    match process_handle.sender.send(channel_message) {
+                    match process_handle
+                        .sender
+                        .send((channel_message, message_source))
+                    {
                         Err(e) => warn!("Error when sending to channel {}: {:?}", channel_id, e),
                         _ => {}
                     };
